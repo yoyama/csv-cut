@@ -1,6 +1,5 @@
 # csv-cut
-
-# csv convert tool
+csv convert tool
 
 ```
   -i <value> | --input <value>
