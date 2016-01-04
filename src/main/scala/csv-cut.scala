@@ -75,26 +75,26 @@ object CsvCutMain {
     sys.exit(ret)
   }
 
-  def map2[X,Y,Z](ox:Option[X], oy:Option[Y])(f:(X,Y)=>Z):Option[Z] = {
-    for{
-      x <- ox
-      y <- oy
-    } yield f(x,y)
-  }
-
   def run(opt:Opt):Int = {
-
-    val outFieldInfo = opt.outFields.map(f => getFields(opt.inputFile, f))
-    val outCsvFormat = new DefaultCSVFormat{
-      override val lineTerminator = opt.outCRLF
-      override val delimiter = opt.outDelimiter
-    }
     val inCsvFormat = new DefaultCSVFormat{
       override val delimiter = opt.inDelimiter
     }
+    val readerAll = CSVReader.open(opt.inputFile, Opt.getEnc(opt.inEnc))(inCsvFormat).toStream
+    if(readerAll.isEmpty){
+      Console.err.println(s"Empty file: ${opt.inputFile}")
+      0
+    } else {
+      run(opt, inCsvFormat, readerAll)
+    }
+  }
 
-    val readerAll = CSVReader.open(opt.inputFile)(inCsvFormat).toStream
-    val header_ = if(opt.inNoHeader) None else  Some(readerAll.head)
+  def run(opt:Opt, inCsvFormat:CSVFormat, readerAll:Stream[List[String]]):Int = {
+
+    val firstRow = readerAll.head
+    val header_ = if(opt.inNoHeader) None else  Some(firstRow)
+
+    val outFieldInfo = opt.outFields.map(f => getFields(firstRow, f))
+
     val header = header_.map(h => outFieldInfo.map(of => OutFieldInfo.field(h,of)).getOrElse(h))
     val reader_ = if(opt.inNoHeader) readerAll else readerAll.tail
     val reader = outFieldInfo.map(of => reader_.map(c => OutFieldInfo.field(c, of))).getOrElse(reader_)
@@ -102,6 +102,11 @@ object CsvCutMain {
     val readers:List[Stream[List[String]]] = opt.line match {
       case Some(l) => reader.toStream.grouped(l).toList
       case None => List(reader.toStream)
+    }
+
+    val outCsvFormat = new DefaultCSVFormat{
+      override val lineTerminator = opt.outCRLF
+      override val delimiter = opt.outDelimiter
     }
 
     val results = readers.zipWithIndex.map{
@@ -123,19 +128,19 @@ object CsvCutMain {
       case Left(e) => true
       case Right(v) => false
     }
+    errResults.foreach{
+      case Left(err) => Console.err.println(err.toString)
+      case _ =>
+    }
+
     if(errResults.size > 0)
       1
     else
       0
   }
 
-  def countColumn(inputFile:File):Int = {
-    val readerAll = CSVReader.open(inputFile).toStream
-    readerAll.head.size
-  }
-
-  def getFields(inputFile:File, fields:String):OutFieldInfo = {
-    val c = countColumn(inputFile)
+  def getFields(column:List[String], fields:String):OutFieldInfo = {
+    val c = column.length
     val o = parseFieldOption(c, fields)
     OutFieldInfo(c, o)
   }
@@ -193,6 +198,15 @@ object CsvCutMain {
         }
       } text("output fields. (ex1) -f 1,2,3 (ex2) -f 2-5 (ex3) -f 3-")
 
+      opt[String]("enc-in") action { (x, o) =>
+        o.copy(inEnc = Some(x))
+      } validate { v =>
+        Opt.encMap.get(Symbol(v)) match {
+          case Some(enc)  => success
+          case _ => failure(s"Invalid param enc-in $v")
+        }
+      } text("input encode (utf | sjis | euc)")
+
       opt[Unit]("no-header-in") action { (x, o) =>
         o.copy(inNoHeader = true) 
       } text("no header for input")
@@ -246,4 +260,12 @@ object CsvCutMain {
       None
     }
   }
+
+  def map2[X,Y,Z](ox:Option[X], oy:Option[Y])(f:(X,Y)=>Z):Option[Z] = {
+    for{
+      x <- ox
+      y <- oy
+    } yield f(x,y)
+  }
+
 }
