@@ -2,15 +2,22 @@ import com.github.tototoshi.csv._
 import java.io.File
 import java.io.FileWriter
 import sys.process._
+import scala.util.control.Exception._
 
 case class Opt(
   inputFile:File,
-  outPrefix:String = "out", outSuffix:String = ".csv",
-  line:Option[Int] = None, field:Option[List[Int]] = None,
+  line:Option[Int] = None,
+  field:Option[List[Int]] = None,
+  inNoHeader:Boolean = false,
+  inEnc:Option[String] = None ,
+  inDelimiter:Char = ',',
+  outPrefix:String = "out",
+  outSuffix:String = ".csv",
   outFields:Option[String] = None,
-  inNoHeader:Boolean = false, outNoHeader:Boolean = false,
-  inEnc:Option[String] = None ,outEnc:Option[String] = None,
-  outCRLF:Option[String] = None,
+  outNoHeader:Boolean = false,
+  outEnc:Option[String] = None,
+  outCRLF:String = Opt.getCRLF(None),
+  outDelimiter:Char = ',',
   debugEnable:Boolean = false
 )
 object Opt {
@@ -27,12 +34,20 @@ object Opt {
 
   def getEnc(enc:Option[String]):String = {
     val v = for{ e <- enc; ee <- encMap.get(Symbol(e))} yield ee
-    v.getOrElse("UTF-8")
+    v.getOrElse(System.getProperty("file.encoding"))
   }
 
   def getCRLF(crlf:Option[String]):String = {
     val v = for{ e <- crlf; ee <- crlfMap.get(Symbol(e))} yield ee
-    v.getOrElse("\n")
+    v.getOrElse(System.getProperty("line.separator"))
+  }
+
+  def getDelimiter(del:String):Char = {
+    del match {
+      case "TAB" | "\t" | "\\t"=> '\t'
+      case "" => ','
+      case x => x.toCharArray()(0)
+    }
   }
 }
 
@@ -70,10 +85,17 @@ object CsvCutMain {
   def run(opt:Opt):Int = {
 
     val outFieldInfo = opt.outFields.map(f => getFields(opt.inputFile, f))
+    val outCsvFormat = new DefaultCSVFormat{
+      override val lineTerminator = opt.outCRLF
+      override val delimiter = opt.outDelimiter
+    }
+    val inCsvFormat = new DefaultCSVFormat{
+      override val delimiter = opt.inDelimiter
+    }
 
-    val readerAll = CSVReader.open(opt.inputFile).toStream
+    val readerAll = CSVReader.open(opt.inputFile)(inCsvFormat).toStream
     val header_ = if(opt.inNoHeader) None else  Some(readerAll.head)
-    val header = map2(header_, outFieldInfo)(OutFieldInfo.field)
+    val header = header_.map(h => outFieldInfo.map(of => OutFieldInfo.field(h,of)).getOrElse(h))
     val reader_ = if(opt.inNoHeader) readerAll else readerAll.tail
     val reader = outFieldInfo.map(of => reader_.map(c => OutFieldInfo.field(c, of))).getOrElse(reader_)
 
@@ -82,19 +104,29 @@ object CsvCutMain {
       case None => List(reader.toStream)
     }
 
-    val outCsvFormat = new DefaultCSVFormat{
-      override val lineTerminator = Opt.getCRLF(opt.outCRLF)
-    }
-    readers.zipWithIndex.map{
-      case (r, idx) =>
+    val results = readers.zipWithIndex.map{
+      case (r, idx) => catching(classOf[Throwable]) either {
         val outName = s"${opt.outPrefix}%03d${opt.outSuffix}".format(idx)
         Console.err.println(s"$outName")
         val writer = CSVWriter.open(new File(outName), Opt.getEnc(opt.outEnc))(outCsvFormat)
         if(!opt.outNoHeader) header.map(h => writer.writeRow(h))
         writer.writeAll(r)
-      case others => Console.err.println(s"Unkown error:${others.toString}")
+        writer.close()
+        (r, idx, outName)
+      }
+      case others => {
+        Console.err.println(s"Unkown error:${others.toString}")
+        Left(new Throwable(s"Unknown error: ${others.toString}"))
+      }
     }
-    0
+    val errResults = results.filter{
+      case Left(e) => true
+      case Right(v) => false
+    }
+    if(errResults.size > 0)
+      1
+    else
+      0
   }
 
   def countColumn(inputFile:File):Int = {
@@ -160,11 +192,14 @@ object CsvCutMain {
           case _ => failure(s"Invalid param f $v")
         }
       } text("output fields. (ex1) -f 1,2,3 (ex2) -f 2-5 (ex3) -f 3-")
-      
 
       opt[Unit]("no-header-in") action { (x, o) =>
         o.copy(inNoHeader = true) 
       } text("no header for input")
+
+      opt[String]("delim-in") action { (x, o) =>
+        o.copy(inDelimiter = Opt.getDelimiter(x))
+      } text("input delimiter char. default ','. TAB,\\t,<tab> are recorgnized tab.")
 
       opt[Unit]("no-header-out") action { (x, o) =>
         o.copy(outNoHeader = true) 
@@ -188,7 +223,7 @@ object CsvCutMain {
       } text("output encode (utf | sjis | euc)")
 
       opt[String]("crlf-out") action { (x, o) =>
-        o.copy(outCRLF = Some(x))
+        o.copy(outCRLF = Opt.getCRLF(Some(x)))
       } validate { v =>
         Opt.crlfMap.get(Symbol(v)) match {
           case Some(crlf)  => success
@@ -196,8 +231,12 @@ object CsvCutMain {
         }
       } text("output crlf  (unix | win | mac)")
 
-      opt[Unit]("debug") action { (x, c) =>
-        c.copy(debugEnable = true)
+      opt[String]("delim-out") action { (x, o) =>
+        o.copy(outDelimiter = Opt.getDelimiter(x))
+      } text("output delimiter char. default ','. TAB,\\t,<tab> are recorgnized tab.")
+
+      opt[Unit]("debug") action { (x, o) =>
+        o.copy(debugEnable = true)
       } text("enable debug")
       help("help") text("prints this usage text")
     }
